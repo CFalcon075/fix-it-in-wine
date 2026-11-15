@@ -53,7 +53,9 @@ Preflight, before any run:
 - the prefix exists and is initialised: `PREFIX/system.reg` is present (if not, the user has never started a program in it — ask);
 - prefix architecture: the line `#arch=win32` or `#arch=win64` in `PREFIX/system.reg`;
 - program architecture: `python3 -c "import sys; sys.path.insert(0, 'tools'); import pe_unmark; print(pe_unmark.pe_machine(open(sys.argv[1], 'rb').read()))" EXE.exe` (run from this skill's directory);
-- if the program needs .NET or Mono, it is installed in the prefix (ask the user how they installed it).
+- if the program needs .NET or Mono, it is installed in the prefix (ask the user how they installed it);
+- with a launcher (Bottles, Lutris, Steam, a Flatpak), the system `wine --version` is not the Wine in use. Take the runner from the launcher's bottle or game config, or from `/proc/PID/cmdline` of the running program. Take the Wine, DXVK and GPU variables from `/proc/PID/environ`, filtered by name (never print the whole environment), and put them in a wrapper script used as `FIW_WINE`;
+- no process of this prefix is running anywhere. A Flatpak sandbox has a private `/tmp`, so a wineserver started on the host does not see the sandbox's wineserver for the same prefix, and two servers on one prefix can lose or corrupt registry changes. Close the program and its helper processes first. Find them by the runner path or by `WINEPREFIX` in `/proc/PID/environ`; `pkill -f PATTERN` also kills the shell that runs it when the pattern is in its own command line.
 
 ### 1a. Look for a ready fix
 
@@ -66,6 +68,8 @@ tools/catalog.py show winehq-59609
 ```
 
 If an entry matches the program and the symptom, read it with `show`. It gives the bug, the DLLs, the patch, how to build it and, when present, prebuilt files and a one-step apply. Tell the user which entry it is. Then use it: build with the entry's patch (step 5) or take its prebuilt files (check the sha256), enable (step 6), verify (step 7). If nothing matches, go on with step 2.
+
+If `catalog.py` stops with "the index must be a JSON array of objects", the index is in the format-1 envelope (`{"format": 1, "entries": [...]}`, issue #13). Report that error to the user, then search the `entries` of `index.json` directly.
 
 ### 2. Baseline digest
 
@@ -82,6 +86,8 @@ tools/wineprobe.py digest LOG --dll comctl32 --dll user32
 ```
 
 Keep the digest. You will compare it with later runs.
+
+On timeout, `wineprobe.py` kills only the `wine` launcher: the program, its helper processes and the wineserver keep running. Stop them with `wineserver -k` (same `WINEPREFIX`, the wineserver of the same Wine build) before the next run or an `override.py` call.
 
 ### 3. Find the DLL
 
@@ -156,6 +162,16 @@ Only changed files are rebuilt. If `git apply` fails, the patch does not fit thi
 
 For comctl32 in Wine 11 there are two modules: `comctl32` and `comctl32_v6`. Build the one the program loads (step 3). Build both if unsure.
 
+When the user's Wine is a fork release (launcher runners often are), build from the fork's tag, not from a WineHQ tag:
+
+```
+FIW_WINE_GIT=https://github.com/OWNER/FORK.git tools/build_one_dll.sh FORK-TAG DLL
+```
+
+- Find the tree: the runner's PE modules often keep their build path in debug strings (`../TREE/dlls/DLL/file.c`), and the fork's release notes name the tag. Confirm the match before you patch: strip both DLLs (`x86_64-w64-mingw32-strip -o`) and compare their sets of printable strings; apart from paths they must be equal.
+- A tree can need a newer toolchain than the distribution has. Example: a winebuild that puts delay-import data into `.didat$N` sections needs binutils 2.44 or newer. With 2.41 the DLL links, but the first delay-loaded call crashes with an access violation in `__delayLoadHelper2`. Check `objdump -h BUILT.dll | grep didat` against `x86_64-w64-mingw32-ld --version`. Use a matching toolchain, or a local build-only change back to `.idata$N` in `tools/winebuild/import.c`; then delete the build's `*.delay.a` files so the import libraries are regenerated. This change is not part of any fix; say so in the report.
+- A crash inside your own build: the digest backtrace gives `DLL + offset`. Map it to a source line with `x86_64-w64-mingw32-addr2line -f -i -e BUILT.dll ADDR`, where ADDR is the PE ImageBase plus the offset.
+
 ### 5a. Waiting for a CI run
 
 ```
@@ -222,6 +238,7 @@ Measuring from outside:
 - Many old programs are DPI-unaware: at 192 DPI Wine scales their coordinates by 2. Code that captures and draws for such a window must work in physical pixels on both sides, or it shows enlarged copies.
 - With WineHQ packages (old WoW64) a 32-bit program loads `lib/wine/i386-unix/*.so`; in new-WoW64 builds only `x86_64-unix` exists. Rebuild and test the layout the program actually uses.
 - Reproduce the user's launch path exactly (menu entry, file manager, `wine`, a launcher): an app-private runtime or override applies only to the paths that use it.
+- Accessibility-based desktop automation does not see Wine windows (they expose no AT-SPI tree). Capture a window with `xwd -id WID` (find WID with `wmctrl -l`). Under a compositor, the capture of a covered window contains the windows on top of it: raise it first (`wmctrl -i -a WID`) and give focus back after. Areas the program never paints show stale content (whatever was there before), not black.
 
 ### 8. Order of fix methods
 
@@ -247,6 +264,10 @@ Windows reference behaviour comes from running the same kind of probe on real Wi
 A gate is valid only if it fails on the known-bad variant: before trusting a new test, run it once on the unfixed or deliberately broken build.
 
 `wine: Unimplemented function DLL.Name called` means Wine does not export a function the program imports; the loader bound an aborting stub. Check the current Wine master (`git fetch --depth 1 origin master`), then implement the export with Windows-measured semantics.
+
+`wine: Call from ADDR to unimplemented function DLL.dll.N` is the same for an import by ordinal N. The digest's `missing imports` names the importing module. When a spec gives no explicit ordinals, Wine numbers the exports in spec order, which matches Windows only where the spec was written that way (d2d1 is). Name the function from a Wine release that already exports ordinal N (compare the module's exports across Wine versions), check that the other ordinals the program imports from that module map to plausible functions, then find the upstream commit with `git log -- dlls/DLL/DLL.spec`. When the stub is hit inside a window procedure, Wine logs `user_callback_handler ignoring exception 80000100` and unwinds the callback; locks the program held there stay taken, so the visible symptom can be a hang or an unpainted window rather than a crash.
+
+A new export can open a code path that uses further stubs. Rerun after each step: the next fixme on the same thread names the next missing piece. Example: a backported d2d1 export led to geometry-realization stubs, and the UI drew only after those were filled too. Each piece is its own patch; record its author and commit.
 
 Wine constants are often calibrated on default sizes. Example: `LISTVIEW_SCROLL_ICON_LINE_SIZE = 37` is half of the default 74-pixel icon spacing. Native v6 scrolls lines × (item spacing on that axis) / 2 per wheel detent, so with 138×144 cells Wine was about 12× slower at 192 DPI. A fixture with default 32×32 icons passes either way. Calibrate against Windows with the application's real sizes and DPI, and put a non-default size in the fixture.
 
