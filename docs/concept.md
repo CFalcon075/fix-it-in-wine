@@ -12,7 +12,8 @@ The skill grew out of the [dllmgr](https://github.com/unxed/dllmgr/blob/main/doc
 - bugs in leaf DLLs;
 - some deeper bugs, through patches over DLLs that cannot be replaced.
 
-For everything else the result is a high-quality report.
+For everything else the result is a high-quality report, with a staged path
+for problems beyond replaceable DLLs described below.
 
 This is cheap because of three primitives:
 
@@ -44,9 +45,31 @@ The user only has to log in to WineHQ Bugzilla, confirm the result by eye, and a
    1. A ready fix from the ticket: `git apply` to the sources of the user's version, build one DLL, enable it for the program, verify.
    2. A small C fix in the Wine sources of the version the user has (or master, if the import check passes), by the same route. A small change is also the easiest for a Wine developer to reimplement from the report.
    3. The bug is deeper (unix part, user32/win32u): a **patch** over a DLL that cannot be replaced. See [patches over DLLs that cannot be replaced](https://github.com/unxed/dllmgr/blob/main/docs/concept.md). The patch intercepts the broken function and supplies the correct behaviour. It is installed through dllmgr under the same rule.
-   4. Rewrite the module from scratch in Bp (as cc580 was). It builds faster, and there is less to think about memory. Use it only when the Wine module does not fit the program by design, or another reference behaviour is needed. Wine will not accept Bp code, so the report stays textual.
+    4. Rewrite the module from scratch in Bp (as cc580 was). It builds faster, and there is less to think about memory. Use it only when the Wine module does not fit the program by design, or another reference behaviour is needed. Wine will not accept Bp code, so the report stays textual.
 
-   Not fixed (wineserver, graphics and drivers, timings, DRM and anti-cheat): report only.
+    Not fixed (wineserver, graphics and drivers, timings, DRM and anti-cheat): report only.
+
+### 3.1 Escalation beyond replaceable DLLs
+
+Use small, reversible, independently testable steps, each limited to one
+application and prefix. When a problem is below the replaceable-DLL boundary,
+first test a narrowly scoped workaround that preserves application features.
+If no such workaround works, treat application-isolated replacement of the
+necessary Wine components as a separate design problem: establish the component
+boundary, compatibility, rollback and test strategy before implementation;
+never change system Wine as a shortcut.
+
+For hardware-key failures, investigate a narrowly scoped host-driver bridge or
+a compatible driver implementation only with evidence and a focused test. If
+the blocker is fundamentally tied to Windows architecture and cannot be handled
+in Wine, ReactOS may be evaluated as a last-resort target. This does not relax
+the clean-room rules in section 6: do not use ReactOS source code or copy its
+implementation. These are directions for investigation, not claims that any
+route is currently available or safe. Use the same RUP progression throughout:
+start with the simplest useful slice, test it, and only then extend the design.
+
+If repeated measurements show that a direction is ineffective, record the
+evidence and revise this roadmap through the normal self-improvement process.
 5. **Upstream report.** A text for bugs.winehq.org: a new bug or a comment in the found ticket. Wine does not accept LLM-generated code, so the report carries no code the agent wrote: the problem, the Windows behaviour, the fix in words and the results. The patch stays in the [dllmgr catalog](https://github.com/unxed/dllmgr/tree/main/catalog); the prose of its fix entry has the same parts as the report (dllmgr decisions D16, D17). Before posting, the gate in step 10 of `SKILL.md` must pass. The agent prepares the text and sends it only after the user says yes. Login: the user logs in to Bugzilla in the agent's browser, or creates an API key once in the profile settings (then the agent writes through REST without driving a browser). The template (`templates/bug-report.md`):
    - program and its version, Wine versions, regression commit;
    - symptom;
